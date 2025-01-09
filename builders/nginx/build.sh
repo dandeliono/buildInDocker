@@ -1,19 +1,24 @@
 #!/bin/bash
 
+# 加载公共函数
+source "$(dirname "$0")/../common.sh"
+
 # 设置变量
-VERSION="1.24.0"
+VERSION="${VERSION:-1.24.0}"
 WORK_DIR="$(pwd)/nginx_build"
 OUTPUT_DIR="$(pwd)/output"
 BASE_IMAGE="ubuntu:20.04"
-MIRROR_TUNA="https://mirrors.tuna.tsinghua.edu.cn"
-MIRROR_ALIYUN="mirrors.aliyun.com"
-BUILDER_TAG="nginx-builder:${VERSION}"
 
-# 获取CPU核心数和内存信息
-CPU_CORES=$(nproc)
-MAKE_JOBS=$(( CPU_CORES * 3 / 2 ))
-MEMORY_GB=$(free -g | awk '/^Mem:/{print $2}')
-TMPFS_SIZE=$(( MEMORY_GB / 2 ))G
+# 根据网络情况设置镜像
+if check_network; then
+    MIRROR_ALIYUN="archive.ubuntu.com"
+    USE_MIRROR=false
+else
+    MIRROR_ALIYUN="mirrors.aliyun.com"
+    USE_MIRROR=true
+fi
+
+NGINX_BUILDER_TAG="nginx-builder:${VERSION}"
 
 # 创建Dockerfile
 create_dockerfile() {
@@ -52,13 +57,22 @@ create_build_script() {
 set -e
 
 cd /tmp
-wget https://nginx.org/download/nginx-\${VERSION}.tar.gz || \\
-wget ${MIRROR_TUNA}/nginx/nginx-\${VERSION}.tar.gz || \\
-exit 1
 
-tar xf nginx-\${VERSION}.tar.gz
-cd nginx-\${VERSION}
+# 下载源码
+if [ "${USE_MIRROR}" = true ]; then
+    wget https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-${VERSION}.tar.gz || \\
+    wget https://nginx.org/download/nginx-${VERSION}.tar.gz || \\
+    exit 1
+else
+    wget https://nginx.org/download/nginx-${VERSION}.tar.gz || \\
+    wget https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-${VERSION}.tar.gz || \\
+    exit 1
+fi
 
+tar xf nginx-${VERSION}.tar.gz
+cd nginx-${VERSION}
+
+# 配置
 ./configure \\
     --prefix=/usr/local/nginx \\
     --user=nginx \\
@@ -93,32 +107,43 @@ cd nginx-\${VERSION}
     --with-http_v2_module \\
     --with-ipv6
 
+# 编译
 make -j${MAKE_JOBS}
+
+# 安装到临时目录
 make DESTDIR=/tmp/nginx_install install
 
-# 创建必要的目录和文件
+# 创建必要的目录
 mkdir -p /tmp/nginx_install/usr/local/nginx/{conf,logs,run}
 
 cd /tmp/nginx_install
-tar czf /output/nginx-\${VERSION}-linux-x86_64.tar.gz *
-sha256sum /output/nginx-\${VERSION}-linux-x86_64.tar.gz > /output/nginx-\${VERSION}-linux-x86_64.sha256
+tar czf /output/nginx-${VERSION}-linux-x86_64.tar.gz *
+sha256sum /output/nginx-${VERSION}-linux-x86_64.tar.gz > /output/nginx-${VERSION}-linux-x86_64.sha256
 EOF
     chmod +x "${WORK_DIR}/build.sh"
 }
 
 main() {
-    # 创建目录
-    mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
-    chmod 777 "${OUTPUT_DIR}"
-
+    # 获取系统信息
+    get_system_info
+    
+    # 运行检查
+    check_system_requirements
+    check_basic_tools
+    check_docker
+    setup_docker_mirror
+    
+    # 准备目录
+    prepare_directories "${WORK_DIR}" "${OUTPUT_DIR}"
+    
     # 创建必要文件
     create_dockerfile
     create_build_script
-
+    
     # 构建镜像
     echo "构建Docker镜像..."
-    docker build -t "${BUILDER_TAG}" "${WORK_DIR}"
-
+    docker build -t "${NGINX_BUILDER_TAG}" "${WORK_DIR}"
+    
     # 运行编译
     echo "开始编译Nginx ${VERSION}..."
     docker run --rm \
@@ -128,11 +153,12 @@ main() {
         --cpuset-cpus="0-$((CPU_CORES-1))" \
         --memory="${TMPFS_SIZE}" \
         --memory-swap="${TMPFS_SIZE}" \
-        "${BUILDER_TAG}" \
+        "${NGINX_BUILDER_TAG}" \
         /bin/bash /build/build.sh
-
+    
     echo "编译完成！"
     echo "编译后的文件位置: ${OUTPUT_DIR}/nginx-${VERSION}-linux-x86_64.tar.gz"
 }
 
+# 运行主函数
 main 
