@@ -1,0 +1,127 @@
+name: Build Components
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: '选择要构建的组件'
+        required: true
+        type: choice
+        options:
+          - zabbix
+          - nginx
+          - neo4j
+          - influxdb
+          - elasticsearch
+      version:
+        description: '组件版本号'
+        required: true
+        type: string
+      platform:
+        description: '平台名称'
+        required: true
+        default: 'Enterprise Linux'
+        type: string
+      vendor:
+        description: '供应商名称'
+        required: true
+        default: 'Your Company'
+        type: string
+
+env:
+  ZABBIX_DEFAULT_VERSION: '6.4.10'
+  NGINX_DEFAULT_VERSION: '1.24.0'
+  NEO4J_DEFAULT_VERSION: '5.13.0'
+  INFLUXDB_DEFAULT_VERSION: '2.7.3'
+  ES_DEFAULT_VERSION: '8.11.3'
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 720  # 12小时超时
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置系统
+        run: |
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo sysctl -w vm.swappiness=80
+          echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
+          echo "DOCKER_BUILDKIT=1" >> $GITHUB_ENV
+
+      - name: 设置构建环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget
+
+      - name: 准备构建脚本
+        run: |
+          case "${{ github.event.inputs.component }}" in
+            "zabbix")
+              cp scripts/zabbix-builder.sh builder.sh
+              VERSION="${{ github.event.inputs.version }}"
+              [ -z "$VERSION" ] && VERSION="${{ env.ZABBIX_DEFAULT_VERSION }}"
+              ;;
+            "nginx")
+              cp scripts/nginx-builder.sh builder.sh
+              VERSION="${{ github.event.inputs.version }}"
+              [ -z "$VERSION" ] && VERSION="${{ env.NGINX_DEFAULT_VERSION }}"
+              ;;
+            "neo4j")
+              cp scripts/neo4j-builder.sh builder.sh
+              VERSION="${{ github.event.inputs.version }}"
+              [ -z "$VERSION" ] && VERSION="${{ env.NEO4J_DEFAULT_VERSION }}"
+              ;;
+            "influxdb")
+              cp scripts/influxdb-builder.sh builder.sh
+              VERSION="${{ github.event.inputs.version }}"
+              [ -z "$VERSION" ] && VERSION="${{ env.INFLUXDB_DEFAULT_VERSION }}"
+              ;;
+            "elasticsearch")
+              cp scripts/es-builder.sh builder.sh
+              VERSION="${{ github.event.inputs.version }}"
+              [ -z "$VERSION" ] && VERSION="${{ env.ES_DEFAULT_VERSION }}"
+              ;;
+          esac
+          
+          # 修改构建脚本中的版本号和其他参数
+          sed -i "s/VERSION=\".*\"/VERSION=\"$VERSION\"/" builder.sh
+          sed -i "s/PLATFORM=\".*\"/PLATFORM=\"${{ github.event.inputs.platform }}\"/" builder.sh
+          sed -i "s/VENDOR=\".*\"/VENDOR=\"${{ github.event.inputs.vendor }}\"/" builder.sh
+
+      - name: 构建组件
+        run: |
+          sudo bash builder.sh
+
+      - name: 上传构建产物
+        if: success() || failure()  # 即使失败也上传日志
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ github.event.inputs.component }}-${{ github.event.inputs.version }}-build-artifacts
+          path: |
+            output/
+            **/CMakeFiles/CMakeError.log
+            **/CMakeFiles/CMakeOutput.log
+          retention-days: 7
+
+      - name: 创建 Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.component }}-${{ github.event.inputs.version }}
+          name: ${{ github.event.inputs.component }} ${{ github.event.inputs.version }}
+          files: |
+            output/${{ github.event.inputs.component }}-${{ github.event.inputs.version }}-linux-x86_64.tar.gz
+            output/${{ github.event.inputs.component }}-${{ github.event.inputs.version }}-linux-x86_64.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
