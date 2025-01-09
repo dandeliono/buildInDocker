@@ -52,6 +52,37 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 检查目录结构
+        run: |
+          echo "检查目录结构..."
+          ls -la
+          echo "检查 builders 目录..."
+          ls -la builders/
+          echo "检查各组件目录..."
+          for component in mysql nginx zabbix neo4j influxdb elasticsearch; do
+            echo "检查 $component 目录..."
+            ls -la builders/$component/ || echo "目录不存在: $component"
+          done
+
+      - name: 创建必要目录
+        run: |
+          echo "创建必要目录..."
+          mkdir -p output
+          for component in mysql nginx zabbix neo4j influxdb elasticsearch; do
+            mkdir -p "builders/$component"
+            if [ ! -f "builders/$component/build.sh" ]; then
+              echo "错误: 缺少构建脚本 builders/$component/build.sh"
+              exit 1
+            fi
+          done
+          chmod 777 output
+
+      - name: 设置脚本权限
+        run: |
+          chmod +x build.sh
+          chmod -R +x builders/*/build.sh
+          ls -la builders/*/build.sh
+
       - name: 设置时间戳
         run: echo "BUILD_TIME=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_ENV
 
