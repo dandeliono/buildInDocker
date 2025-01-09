@@ -8,6 +8,7 @@ VERSION="${VERSION:-1.24.0}"
 WORK_DIR="$(pwd)/nginx_build"
 OUTPUT_DIR="$(pwd)/output"
 BASE_IMAGE="ubuntu:20.04"
+CCACHE_DIR="${WORK_DIR}/ccache"
 
 # 根据网络情况设置镜像
 if check_network; then
@@ -26,6 +27,9 @@ create_dockerfile() {
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/usr/lib/ccache:\$PATH"
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_SIZE=5G
 
 # 使用镜像源
 RUN sed -i "s/archive.ubuntu.com/${MIRROR_ALIYUN}/g" /etc/apt/sources.list && \
@@ -36,6 +40,7 @@ RUN apt-get update && apt-get install -y \\
     build-essential \\
     wget \\
     git \\
+    ccache \\
     libpcre3-dev \\
     libssl-dev \\
     zlib1g-dev \\
@@ -45,6 +50,10 @@ RUN apt-get update && apt-get install -y \\
     libxslt1-dev \\
     libperl-dev \\
     && rm -rf /var/lib/apt/lists/*
+
+# 配置 ccache
+RUN mkdir -p /ccache && chmod 777 /ccache
+RUN ccache -M 5G
 
 WORKDIR /build
 EOF
@@ -56,6 +65,8 @@ create_build_script() {
 #!/bin/bash
 set -e
 
+# 挂载 tmpfs
+mount -t tmpfs -o size=${TMPFS_SIZE} tmpfs /tmp
 cd /tmp
 
 # 下载源码
@@ -71,6 +82,11 @@ fi
 
 tar xf nginx-${VERSION}.tar.gz
 cd nginx-${VERSION}
+
+# 配置编译优化参数
+export CFLAGS="-O3 -pipe -fomit-frame-pointer -march=native"
+export CXXFLAGS="\${CFLAGS}"
+export LDFLAGS="-Wl,-O1 -Wl,--as-needed"
 
 # 配置
 ./configure \\
@@ -107,8 +123,8 @@ cd nginx-${VERSION}
     --with-http_v2_module \\
     --with-ipv6
 
-# 编译
-make -j${MAKE_JOBS}
+# 编译(增加并行度)
+make -j$((CPU_CORES * 2))
 
 # 安装到临时目录
 make DESTDIR=/tmp/nginx_install install
@@ -135,6 +151,8 @@ main() {
     
     # 准备目录
     prepare_directories "${WORK_DIR}" "${OUTPUT_DIR}"
+    mkdir -p "${CCACHE_DIR}"
+    chmod 777 "${CCACHE_DIR}"
     
     # 创建必要文件
     create_dockerfile
@@ -150,6 +168,8 @@ main() {
         --privileged \
         -v "${OUTPUT_DIR}:/output" \
         -v "${WORK_DIR}:/build" \
+        -v "${CCACHE_DIR}:/ccache" \
+        --tmpfs /tmp:exec,size=${TMPFS_SIZE} \
         --cpuset-cpus="0-$((CPU_CORES-1))" \
         --memory="${TMPFS_SIZE}" \
         --memory-swap="${TMPFS_SIZE}" \

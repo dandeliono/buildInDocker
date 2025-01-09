@@ -4,93 +4,52 @@
 source "$(dirname "$0")/../common.sh"
 
 # 设置变量
-VERSION="${VERSION:-8.0.37}"
+VERSION="${VERSION:-8.0.35}"
 WORK_DIR="$(pwd)/mysql_build"
 OUTPUT_DIR="$(pwd)/output"
 BASE_IMAGE="ubuntu:20.04"
-
-# 获取 MySQL 主版本号
-MYSQL_MAJOR_VERSION=$(echo ${VERSION} | cut -d. -f1-2)
+CCACHE_DIR="${WORK_DIR}/ccache"
 
 # MySQL安装相关配置
 MYSQL_INSTALL_PREFIX="/usr/local/mysql"  # 安装目录
-MYSQL_DATA_DIR="/data/mysql"            # 数据目录
-MYSQL_CONFIG_DIR="/etc/mysql"           # 配置文件目录
-MYSQL_LOG_DIR="/var/log/mysql"          # 日志目录
+MYSQL_DATA_DIR="/usr/local/mysql/data"   # 数据目录
+MYSQL_CONFIG_DIR="/etc/mysql"            # 配置文件目录
+MYSQL_LOG_DIR="/var/log/mysql"           # 日志目录
 
 # 版本信息配置
-MYSQL_PLATFORM="Enterprise Linux"  # 平台名称
-MYSQL_VENDOR="Your Company"       # 供应商名称
-MYSQL_SERVER_SUFFIX=""           # 服务器后缀
-MYSQL_DISTRIBUTION="Custom Build" # 分发类型
+MYSQL_PLATFORM="${PLATFORM:-Enterprise Linux}"  # 平台名称
+MYSQL_VENDOR="${VENDOR:-Your Company}"         # 供应商名称
+MYSQL_SERVER_SUFFIX="${SERVER_SUFFIX:-}"       # 服务器后缀
+MYSQL_DISTRIBUTION="${DISTRIBUTION:-Custom Build}" # 分发类型
 
 # 根据网络情况设置镜像
 if check_network; then
-    MIRROR_TUNA="https://dev.mysql.com/get/Downloads"
     MIRROR_ALIYUN="archive.ubuntu.com"
+    USE_MIRROR=false
 else
-    MIRROR_TUNA="https://mirrors.tuna.tsinghua.edu.cn"
     MIRROR_ALIYUN="mirrors.aliyun.com"
+    USE_MIRROR=true
 fi
 
 MYSQL_BUILDER_TAG="mysql-builder:${VERSION}"
 
-CMAKE_OPTS="-DCMAKE_INSTALL_PREFIX=${MYSQL_INSTALL_PREFIX} \
-    -DMYSQL_DATADIR=${MYSQL_DATA_DIR} \
-    -DSYSCONFDIR=${MYSQL_CONFIG_DIR} \
-    -DWITH_INNOBASE_STORAGE_ENGINE=1 \
-    -DWITH_SSL=system \
-    -DWITH_ZLIB=bundled \
-    -DWITH_NUMA=ON \
-    -DDOWNLOAD_BOOST=1 \
-    -DWITH_BOOST=/tmp/boost \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DWITHOUT_EXAMPLE_STORAGE_ENGINE=1 \
-    -DWITHOUT_FEDERATED_STORAGE_ENGINE=1 \
-    -DWITHOUT_ARCHIVE_STORAGE_ENGINE=1 \
-    -DFORCE_INSOURCE_BUILD=1 \
-    -DSYSTEM_TYPE='Generic' \
-    -DMACHINE_TYPE='${MYSQL_PLATFORM}' \
-    -DCOMPILER_VENDOR='${MYSQL_VENDOR}' \
-    -DSERVER_SUFFIX='${MYSQL_SERVER_SUFFIX}' \
-    -DMYSQL_SERVER_SUFFIX='${MYSQL_SERVER_SUFFIX}' \
-    -DMYSQL_DISTRIBUTION='${MYSQL_DISTRIBUTION}'"
-
 # 创建Dockerfile
 create_dockerfile() {
-    cat > "${WORK_DIR}/Dockerfile" << EOF
-FROM ${BASE_IMAGE}
+    # 使用基础Dockerfile
+    create_base_dockerfile "${MIRROR_ALIYUN}" > "${WORK_DIR}/Dockerfile"
+    
+    # 添加MySQL特定依赖
+    cat >> "${WORK_DIR}/Dockerfile" << EOF
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# 使用镜像源
-RUN sed -i "s/archive.ubuntu.com/${MIRROR_ALIYUN}/g" /etc/apt/sources.list && \
-    sed -i "s/security.ubuntu.com/${MIRROR_ALIYUN}/g" /etc/apt/sources.list
-
-# 安装编译依赖
+# 安装MySQL编译依赖
 RUN apt-get update && apt-get install -y \\
-    build-essential \\
-    cmake \\
+    bison \\
     libncurses5-dev \\
     libssl-dev \\
-    pkg-config \\
-    bison \\
-    wget \\
-    git \\
-    perl \\
-    openssl \\
-    numactl \\
     libnuma-dev \\
-    libtirpc-dev \\
-    gcc \\
-    g++ \\
     libreadline-dev \\
     zlib1g-dev \\
     && rm -rf /var/lib/apt/lists/*
-
-# 创建工作目录
-RUN mkdir -p /build
-WORKDIR /build
 EOF
 }
 
@@ -100,23 +59,73 @@ create_build_script() {
 #!/bin/bash
 set -e
 
+# 挂载 tmpfs
+mount -t tmpfs -o size=${TMPFS_SIZE} tmpfs /tmp
 cd /tmp
-wget ${MIRROR_TUNA}/mysql/downloads/MySQL-${MYSQL_MAJOR_VERSION}/mysql-${VERSION}.tar.gz || \\
-wget https://dev.mysql.com/get/Downloads/MySQL-${MYSQL_MAJOR_VERSION}/mysql-${VERSION}.tar.gz || \\
-error_exit "MySQL源码下载失败"
 
-tar xzf mysql-${VERSION}.tar.gz
+# 提取主版本号
+MAJOR_VERSION=\$(echo ${VERSION} | cut -d. -f1)
+
+# 下载源码
+if [ "${USE_MIRROR}" = true ]; then
+    wget https://mirrors.tuna.tsinghua.edu.cn/mysql/downloads/MySQL-\${MAJOR_VERSION}.0/mysql-${VERSION}.tar.gz || \\
+    wget https://mirrors.aliyun.com/mysql/MySQL-\${MAJOR_VERSION}.0/mysql-${VERSION}.tar.gz || \\
+    wget https://dev.mysql.com/get/Downloads/MySQL-\${MAJOR_VERSION}.0/mysql-${VERSION}.tar.gz || \\
+    exit 1
+else
+    wget https://dev.mysql.com/get/Downloads/MySQL-\${MAJOR_VERSION}.0/mysql-${VERSION}.tar.gz || \\
+    wget https://mirrors.tuna.tsinghua.edu.cn/mysql/downloads/MySQL-\${MAJOR_VERSION}.0/mysql-${VERSION}.tar.gz || \\
+    exit 1
+fi
+
+tar xf mysql-${VERSION}.tar.gz
 cd mysql-${VERSION}
-mkdir build
-cd build
 
 # 设置编译优化
-export CFLAGS="-O3 -pipe -march=native"
-export CXXFLAGS="\${CFLAGS}"
+setup_compilation_flags
 
-cmake .. ${CMAKE_OPTS}
-make -j${MAKE_JOBS}
-make DESTDIR=/tmp/mysql_install install
+# 创建构建目录
+mkdir -p build
+cd build
+
+# 配置
+cmake .. \\
+    -DCMAKE_INSTALL_PREFIX=${MYSQL_INSTALL_PREFIX} \\
+    -DMYSQL_DATADIR=${MYSQL_DATA_DIR} \\
+    -DSYSCONFDIR=${MYSQL_CONFIG_DIR} \\
+    -DWITH_INNOBASE_STORAGE_ENGINE=1 \\
+    -DWITH_PARTITION_STORAGE_ENGINE=1 \\
+    -DWITH_FEDERATED_STORAGE_ENGINE=1 \\
+    -DWITH_BLACKHOLE_STORAGE_ENGINE=1 \\
+    -DWITH_MYISAM_STORAGE_ENGINE=1 \\
+    -DWITH_ARCHIVE_STORAGE_ENGINE=1 \\
+    -DWITH_READLINE=1 \\
+    -DWITH_SSL=system \\
+    -DWITH_ZLIB=bundled \\
+    -DWITH_NUMA=ON \\
+    -DWITH_BOOST=boost \\
+    -DENABLED_LOCAL_INFILE=1 \\
+    -DWITH_DEBUG=0 \\
+    -DENABLE_DTRACE=0 \\
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \\
+    -DWITH_EMBEDDED_SERVER=OFF \\
+    -DSYSTEM_TYPE='Generic' \\
+    -DMACHINE_TYPE='${MYSQL_PLATFORM}' \\
+    -DCOMPILER_VENDOR='${MYSQL_VENDOR}' \\
+    -DSERVER_SUFFIX='${MYSQL_SERVER_SUFFIX}' \\
+    -DMYSQL_SERVER_SUFFIX='${MYSQL_SERVER_SUFFIX}' \\
+    -DMYSQL_DISTRIBUTION='${MYSQL_DISTRIBUTION}' \\
+    -G Ninja
+
+# 编译
+ninja
+
+# 安装到临时目录
+DESTDIR=/tmp/mysql_install ninja install
+
+# 创建必要的目录
+mkdir -p /tmp/mysql_install${MYSQL_LOG_DIR}
+mkdir -p /tmp/mysql_install${MYSQL_CONFIG_DIR}
 
 cd /tmp/mysql_install
 tar czf /output/mysql-${VERSION}-linux-x86_64.tar.gz *
@@ -137,6 +146,7 @@ main() {
     
     # 准备目录
     prepare_directories "${WORK_DIR}" "${OUTPUT_DIR}"
+    setup_ccache "${CCACHE_DIR}"
     
     # 创建必要文件
     create_dockerfile
@@ -148,15 +158,12 @@ main() {
     
     # 运行编译
     echo "开始编译MySQL ${VERSION}..."
-    docker run --rm \
-        --privileged \
-        -v "${OUTPUT_DIR}:/output" \
-        -v "${WORK_DIR}:/build" \
-        --cpuset-cpus="0-$((CPU_CORES-1))" \
-        --memory="${TMPFS_SIZE}" \
-        --memory-swap="${TMPFS_SIZE}" \
+    run_docker_build \
         "${MYSQL_BUILDER_TAG}" \
-        /bin/bash /build/build.sh
+        "${WORK_DIR}" \
+        "${OUTPUT_DIR}" \
+        "${CCACHE_DIR}" \
+        "/build/build.sh"
     
     echo "编译完成！"
     echo "编译后的文件位置: ${OUTPUT_DIR}/mysql-${VERSION}-linux-x86_64.tar.gz"
