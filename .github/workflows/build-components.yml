@@ -86,17 +86,50 @@ jobs:
       - name: 设置时间戳
         run: echo "BUILD_TIME=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_ENV
 
+      - name: 清理磁盘空间
+        run: |
+          echo "清理前的磁盘空间..."
+          df -h
+          
+          echo "删除不需要的大型软件包..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          
+          echo "清理apt缓存..."
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          
+          echo "删除Docker镜像..."
+          sudo docker image prune -af
+          
+          echo "清理后的磁盘空间..."
+          df -h
+
       - name: 配置系统
         run: |
+          # 获取可用内存和磁盘空间
+          FREE_DISK_GB=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
+          echo "可用磁盘空间: ${FREE_DISK_GB}GB"
+          
+          # 计算合适的 swap 大小（最大 8GB）
+          SWAP_SIZE=$((FREE_DISK_GB > 10 ? 8 : FREE_DISK_GB - 2))
+          echo "设置 swap 大小为: ${SWAP_SIZE}GB"
+          
           sudo swapoff -a
           sudo rm -f /swapfile
-          sudo fallocate -l 16G /swapfile
+          sudo fallocate -l ${SWAP_SIZE}G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           sudo sysctl -w vm.swappiness=80
           echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
           echo "DOCKER_BUILDKIT=1" >> $GITHUB_ENV
+          
+          # 显示内存信息
+          free -h
 
       - name: 设置构建环境
         run: |
