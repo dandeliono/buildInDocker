@@ -1,0 +1,62 @@
+name: Build MySQL
+
+on:
+  workflow_dispatch:
+    inputs:
+      mysql_version:
+        description: 'MySQL 版本号'
+        required: true
+        default: '8.0.37'
+        type: string
+      platform:
+        description: '平台名称'
+        required: true
+        default: 'Enterprise Linux'
+        type: string
+      vendor:
+        description: '供应商名称'
+        required: true
+        default: 'Your Company'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置构建环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget
+
+      - name: 修改脚本变量
+        run: |
+          sed -i "s/MYSQL_VERSION=\".*\"/MYSQL_VERSION=\"${{ github.event.inputs.mysql_version }}\"/" mysql-builder.sh
+          sed -i "s/MYSQL_PLATFORM=\".*\"/MYSQL_PLATFORM=\"${{ github.event.inputs.platform }}\"/" mysql-builder.sh
+          sed -i "s/MYSQL_VENDOR=\".*\"/MYSQL_VENDOR=\"${{ github.event.inputs.vendor }}\"/" mysql-builder.sh
+
+      - name: 构建 MySQL
+        run: |
+          sudo bash mysql-builder.sh
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v3
+        with:
+          name: mysql-${{ github.event.inputs.mysql_version }}-linux-x86_64
+          path: mysql_output/mysql-${{ github.event.inputs.mysql_version }}-linux-x86_64.tar.gz
+          retention-days: 7
+
+      - name: 创建 Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: mysql-${{ github.event.inputs.mysql_version }}
+          name: MySQL ${{ github.event.inputs.mysql_version }}
+          files: mysql_output/mysql-${{ github.event.inputs.mysql_version }}-linux-x86_64.tar.gz
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
